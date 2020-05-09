@@ -52,7 +52,17 @@ fun binop (op) {
   ]
 }
 
-local primary  = memo $ eta syntax (
+local ifPart = memo $ eta syntax (
+                                    loc=pos cond=exp 
+                                            kThen body=exp 
+                                            alt=(
+                                                kElif altBody=ifPart  { fun (a) { If (cond (Val), body (a), altBody (a))}} |
+                                                kElse altBody=exp kFi { fun (a) { If (cond (Val), body (a), altBody (a))}} |
+                                                kFi                   { fun (a) { assertVoid (a, If (cond (Val), body (Void), Skip), loc)}}
+                                                ){ alt }
+                                ),
+
+      primary  = memo $ eta syntax (
                                     -- decimal constant
                                     loc=pos x=decimal                                 {fun (a) {assertValue (a, Const (stringInt (x)), loc)}}     |
 
@@ -64,7 +74,40 @@ local primary  = memo $ eta syntax (
                                                                                          | _    -> Var (x)
                                                                                          esac
                                                                                       }} |
-                                    $(failure ("the rest of primary parsing in not implemented\n"))),
+
+                                    loc=pos kSkip                                     {fun (a) { assertVoid (a, Skip, loc) }} |
+
+                                    loc=pos kWrite s["("] e=exp s[")"]                {fun (a) {assertVoid (a, Write(e(Val)), loc)}} |
+
+                                    loc=pos kRead  x=inbr[s("("), lident, s(")")]     {fun (a) {assertVoid (a, Read(x), loc) }} |
+
+                                            kIf    e=ifPart                           {fun (a) {e(a)}} |
+
+                                    loc=pos kWhile cond=exp
+                                            kDo    body=exp
+                                            kOd {
+                                              fun (a) { assertVoid (a, While (cond (Val), body (Void)), loc) }
+                                            } |
+
+                                    loc=pos kFor init=exp s[","] cond=exp s[","] step=exp
+                                            kDo  body=exp 
+                                            kOd {
+                                              fun (a) {
+                                                assertVoid (a, 
+                                                            Seq (init (Void), While (cond (Val), Seq (body (Void), step (Void)))), 
+                                                            loc) 
+                                              }
+                                            } |
+
+                                    loc=pos kRepeat body=exp 
+                                            kUntil cond=primary {
+                                              fun (a) { assertVoid (a, Repeat (body (Void), cond (Val)), loc) }
+                                            } |
+                                    
+                                    inbr[s("("), exp, s(")")]
+                                    ),
+
+                                    --$(failure ("the rest of primary parsing in not implemented\n"))),
       basic    = memo $ eta (expr ({[Right, singleton ([s (":="),
                                                         fun (l, loc, r) {
                                                           fun (a) {assertValue (a, Assn (l (Ref), r (Val)), loc)}
@@ -76,6 +119,7 @@ local primary  = memo $ eta syntax (
                                     [Left , map (binop, {"*", "/", "%"})]
                                    },
                                    primary)(id)),
+
       exp      = memo $ eta syntax (basic | s1=basic s[";"] s2=exp {fun (a) {Seq (s1 (Void), s2 (a))}});
                          
 -- Public top-level parser

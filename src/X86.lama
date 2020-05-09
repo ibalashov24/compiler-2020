@@ -401,6 +401,16 @@ fun compile (env, code) {
     esac
   }
 
+  -- Compiles Lea operation to X86 using 
+  -- intermediate register if needed
+  fun compileLea (l, r) {
+    if memOpnd (r) then
+      { Lea (l, eax), Mov (eax, r) }
+    else 
+      singleton (Lea (l, r))
+    fi
+  }
+
   fun compile (env, code) {
     foldl (
       fun ([env, scode], i) {
@@ -415,12 +425,12 @@ fun compile (env, code) {
               [s, env] -> [env, code : {Push (s), Call ("Lwrite"), Pop (eax)}]
             esac
         | LD (x)      -> 
-            case env.allocate of
+            case env.addGlobal(x).allocate of
               [s, env] -> [env, code : move (env.loc (x), s)]
             esac
         | ST (x)      ->
-            case env.pop of
-              [s, env] -> [env.addGlobal (x), code : move (s, env.loc (x))]
+            case env.addGlobal(x) of
+              env     -> [env, code : move (env.peek, env.loc (x))]
             esac
         | CONST (n)   -> 
             case env.allocate of
@@ -430,11 +440,29 @@ fun compile (env, code) {
             case env.pop2 of
               [l, r, env] -> [env.push (r), code : op.compileBinop (l, r)]
             esac 
-        | LABEL (l)   -> [env, code : singleton (Label (l))]
-        | JMP (l)     -> [env, code : singleton (Jmp (l))]
+        | LABEL (l)   -> 
+            if isBarrier (env) then
+              [retrieveStack (env, l), code : singleton (Label (l))]
+            else 
+              [env, code : singleton (Label (l))]
+            fi
+        | JMP (l)     -> [setBarrier(setStack (env, l)), code : singleton (Jmp (l))]
         | CJMP (c, l) -> 
             case env.pop of
-                [top, env] -> [env, code : { Binop ("cmp", L (0), top), CJmp (c, l) }]
+              [top, env] -> [setStack (env, l), code : { Binop ("cmp", L (0), top), CJmp (c, l) }]
+            esac
+        | DROP -> 
+            case env.pop of
+              [_, env] -> [env, code]
+            esac
+        | STI  -> 
+            case env.pop2 of
+              [y, x, env] -> 
+                [env.push (x), code : { Mov (y, eax), Mov (x, edx), Mov (eax, I (0, edx)), Mov (eax, x)}]
+            esac
+        | LDA (x) ->
+            case env.addGlobal(x).allocate of
+                [top, env] -> [env, code : { compileLea (env.loc(x), top) }]
             esac
         | _ -> failure ("Codegeneration for the instruction %s is not yet implemented\n", i.string)
         esac

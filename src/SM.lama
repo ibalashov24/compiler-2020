@@ -60,18 +60,20 @@ fun fromLabel (env, lab) {
 -- returns a final configuration
 fun eval (env, [stack, state, world], program) {
   case program of
-    BINOP (op) : tail -> 
+    BINOP (op)  : tail -> 
         case stack of
           right : left : stackTail -> 
-             eval (env, [evalBinop (op, left, right) : stackTail, state, world], tail) 
+             eval (env, [evalOp (op, left, right) : stackTail, state, world], tail) 
         esac
 
   | CONST (n)   : tail -> 
         eval (env, [n : stack, state, world], tail)
 
   | READ        : tail -> 
-        local readResult = world.readWorld;
-        eval (env, [readResult[0] : stack, state, readResult[1]], tail)
+        case readWorld (world) of
+          [val, world] ->
+            eval (env, [val : stack, state, world], tail)
+        esac
 
   | WRITE       : tail ->
         case stack of
@@ -84,8 +86,8 @@ fun eval (env, [stack, state, world], program) {
 
   | ST (x)      : tail ->
         case stack of 
-          top : stackTail ->
-              eval (env, [stackTail, state <- [x, top], world], tail)
+          top : _ ->
+              eval (env, [stack, state <- [x, top], world], tail)
         esac 
   | LABEL (l)   : tail -> eval (env, [stack, state, world], tail)
   | JMP (l)     : tail -> 
@@ -99,6 +101,16 @@ fun eval (env, [stack, state, world], program) {
         case stack of
           0 : stackTail -> eval (env, [stackTail, state, world], fromLabel (env, l))
         | _ : stackTail -> eval (env, [stackTail, state, world], tail)
+        esac
+  | LDA (x) : tail   -> eval (env, [Ref (x) : stack, state, world], tail)
+  | STI            : tail -> 
+        case stack of 
+          v : Ref (x) : stackTail -> 
+            eval (env, [v : stackTail, state <- [x, v], world], tail)
+        esac
+  | DROP           : tail ->
+        case stack of
+          _ : stackTail -> eval (env, [stackTail, state, world], tail)
         esac
   | _                -> [stack, state, world]
   esac 
@@ -139,70 +151,87 @@ fun genLabels (env, n) {
   listArray (inner (env, n))
 }
 
--- Compiles an expression into a stack machine code.
--- Takes an expression, returns a list (of, possibly, lists)
--- of stack machine instructions
-fun compileExpr (expr) {
-  case expr of
-    Binop (op, l, r)  -> { l.compileExpr, r.compileExpr, singleton (BINOP (op)) }
-  | Const (n)         -> singleton (CONST (n))
-  | Var (x)           -> singleton (LD (x))
-  esac
-}
-
 -- Compiles a statement into a stack machine code.
 -- Takes an expression, returns a list of stack machine
 -- instructions.
 public fun compileSM (stmt) {
     fun compile (env, stmt) {
       case stmt of
-        Read (x)       -> [env, { READ, ST (x) }]
-      | Write (x)      -> [env, { compileExpr (x), WRITE }]
+        Binop (op, l, r) -> case compile (env, l) of
+                              [env, prog1] ->
+                                case compile (env, r) of
+                                  [env, prog2] -> [env, { prog1, prog2, BINOP (op) }]
+                                esac
+                            esac
+      | Const (n)      -> [env, singleton (CONST (n))]
+      | Var (x)        -> [env, singleton (LD (x))]
+      | Read (x)       -> [env, { READ, ST (x), DROP }]
+      | Write (x)      -> case compile (env, x) of
+                            [env, prog] -> [env, { prog, WRITE }]
+                          esac
       | Seq (x1, x2)   -> case compile (env, x1) of 
                               [env1, prog1] ->
                                   case compile (env1, x2) of 
                                       [env2, prog2] -> [env2, { prog1, prog2 }]
                                   esac
                           esac
-      | Assn (x, e)    -> [env, { compileExpr (e), ST (x) }]
+      | Assn (x, e)    -> case compile (env, x) of
+                            [env, prog1] ->
+                               case compile (env, e) of
+                                 [env, prog2] -> [env, { prog1, prog2, STI }]
+                               esac
+                          esac
       | While (e, s)   -> case genLabels (env, 2) of
-                              [lCond, lLoop, env1] ->
-                                  case compile (env1, s) of
-                                      [env2, prog] -> 
-                                          [env2, { 
-                                            JMP (lCond), 
-                                            LABEL (lLoop), 
-                                            prog, 
-                                            LABEL (lCond), 
-                                            compileExpr (e), 
-                                            CJMP ("nz", lLoop) }]
+                              [lCond, lLoop, env] ->
+                                  case compile (env, s) of
+                                      [env, prog] -> 
+                                        case compile (env, e) of
+                                          [env, cond] ->
+                                                [env, { 
+                                                    JMP (lCond), 
+                                                    LABEL (lLoop), 
+                                                    prog, 
+                                                    LABEL (lCond), 
+                                                    cond, 
+                                                    CJMP ("nz", lLoop) }]
+                                        esac
                                   esac
                           esac
       | Repeat (s, e)  -> case genLabel (env) of
-                            [lLoop, env1] -> 
-                                case compile (env1, s) of 
-                                    [env2, prog] -> [env2, { 
-                                                        LABEL (lLoop), 
-                                                        prog,
-                                                        compileExpr (e), 
-                                                        CJMP ("z", lLoop) }] 
+                            [lLoop, env] -> 
+                                case compile (env, s) of 
+                                    [env, prog] -> 
+                                      case compile (env, e) of
+                                        [env, cond] -> [env, { 
+                                                            LABEL (lLoop), 
+                                                            prog,
+                                                            cond, 
+                                                            CJMP ("z", lLoop) }] 
+                                      esac
                                 esac
                           esac
       | If (e, s1, s2) -> case genLabels (env, 2) of
-                              [lElse, lEnd, env1] -> 
-                                  case compile (env1, s1) of
-                                      [env2, prog1] -> 
-                                          case compile (env2, s2) of
-                                              [env3, prog2] -> [env3, { 
-                                                  compileExpr (e), 
-                                                  CJMP ("nz", lElse), 
-                                                  prog2,
-                                                  JMP (lEnd),
-                                                  LABEL (lElse), 
-                                                  prog1,
-                                                  LABEL (lEnd) }]
+                              [lElse, lEnd, env] -> 
+                                  case compile (env, s1) of
+                                      [env, prog1] -> 
+                                          case compile (env, s2) of
+                                              [env, prog2] -> 
+                                                case compile (env, e) of
+                                                  [env, cond] -> [env, { 
+                                                        cond, 
+                                                        CJMP ("nz", lElse), 
+                                                        prog2,
+                                                        JMP (lEnd),
+                                                        LABEL (lElse), 
+                                                        prog1,
+                                                        LABEL (lEnd) }]
+                                                esac
                                           esac
                                   esac
+                          esac
+      | Ref (x)        -> [env, singleton (LDA (x))]
+      | Ignore (x)     -> case compile (env, x) of
+                            [env, p] -> [env, {p, DROP}]
                           esac
       | Skip           -> [env, { }]
       esac 
